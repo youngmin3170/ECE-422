@@ -1,0 +1,19 @@
+#!/bin/bash
+if [ "$EUID" -ne 0 ]; then
+    echo "please run as root"
+    exit 1
+fi
+echo "Stopping NetSec environment..."
+
+docker stop -t 3 $(docker ps -aq 2>/dev/null) >/dev/null 2>&1
+service docker stop >/dev/null 2>&1
+
+VM_NAME="netbsd"
+CONFIG_DIR="/srv/netsec"
+virsh destroy ${VM_NAME} >/dev/null 2>&1
+
+# restore default iptables rules
+iptables-restore < /etc/iptables/rules.v4 >/dev/null 2>&1
+
+echo "NetSec environment stopped"
+echo "To re-start, please run 'netsec-start'"

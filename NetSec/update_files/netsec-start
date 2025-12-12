@@ -1,0 +1,44 @@
+#!/bin/bash
+if [ "$EUID" -ne 0 ]; then
+    echo "please run as root"
+    exit 1
+fi
+CONFIG_DIR="/srv/netsec"
+COUNT="$(wc -l ${CONFIG_DIR}/netids | cut -d' ' -f1)"
+if [ "${COUNT}" == "0" ]; then
+    echo "NetSec environment is not properly set up."
+    echo "Please re-run 'netsec-setup'."
+    exit 1
+fi
+
+echo "Restarting NetSec environment..."
+echo "This may take a few minutes."
+# add iptables rules
+${CONFIG_DIR}/helper/hidden/add-forwarding-rules.sh >/dev/null 2>&1
+
+service docker restart >/dev/null 2>&1
+ethtool --offload switch rx off tx off sg off tso off >/dev/null 2>&1
+brctl stp switch off >/dev/null 2>&1
+brctl setfd switch 0 >/dev/null 2>&1
+docker start $(docker ps -aq 2>/dev/null) >/dev/null 2>&1
+
+brctl stp shimomura off >/dev/null 2>&1
+brctl setfd shimomura 0 >/dev/null 2>&1
+VM_NAME="netbsd"
+virsh destroy ${VM_NAME} >/dev/null 2>&1
+virsh snapshot-revert --domain ${VM_NAME} --snapshotname genesis >/dev/null 2>&1
+virsh start ${VM_NAME} >/dev/null 2>&1
+
+VM_IP="10.4.61.25"
+VM_NAME="Osiris"
+TIMEOUT=180
+echo "Please wait up to ${TIMEOUT} seconds for Osiris (${VM_IP}) to be ready..."
+timeout ${TIMEOUT} /bin/bash -c "until ping -c1 ${VM_IP} &>/dev/null; do sleep 3; done"
+ping -c1 ${VM_IP} &>/dev/null || {
+    echo "Failed to reach ${VM_NAME} within ${TIMEOUT} seconds.";
+    echo "Try 'ping ${VM_IP}' to check if ${VM_NAME} is online."
+    echo "If ${VM_NAME} doesn't become reachable within 5 minutes, please re-run 'netsec-start' or 'netsec-setup'."
+    exit 1;
+}
+
+echo "NetSec environment restarted"

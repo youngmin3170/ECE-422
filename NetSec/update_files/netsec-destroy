@@ -1,0 +1,76 @@
+#!/bin/bash
+if [ "$EUID" -ne 0 ]; then
+    echo "please run as root"
+    exit 1
+fi
+
+echo "WARNING: You are about to destroy an existing NetSec environment."
+echo "* Any data stored or changes made on any host inside the networks will be permanently lost."
+echo "* Any data stored inside '/root/shared-with-host' on the Attacker host will remain untouched."
+#echo "If you wish to keep the environment but temporarily stop running it, please run 'netsec-stop' instead."
+echo ""
+
+while true; do
+    read -p "Do you wish to continue - [Y]es/[N]o? " yn
+    case ${yn} in
+        [Yy] )
+            break
+            ;;
+        [Nn] )
+            echo "No change has been made."
+            exit 1
+            ;;
+        * )
+            echo "Please answer Y or N."
+            ;;
+    esac
+done
+
+echo "Tearing down existing NetSec environment..."
+CONFIG_DIR="/srv/netsec"
+
+# rm docker bridge
+NETWORK_ALIAS="bankofbailey.com"
+docker network rm ${NETWORK_ALIAS} >/dev/null 2>&1
+
+# remove iptables update script from cronjob
+sed -i "/update-iptables/d" /etc/crontab
+
+# reset sysctl setting
+sed -i "/^net\.ipv4\.ip_forward/d" /etc/sysctl.conf
+sed -i "/\.rp_filter/d" /etc/sysctl.conf
+
+# disable custom run-level services for disabling tcp offloading and starting netsec
+update-rc.d disable-toe disable
+update-rc.d start-netsec disable
+
+cat /dev/null > ${CONFIG_DIR}/netids
+
+# teardown docker
+# remove container instances
+docker rm -f $(docker ps -aq 2>/dev/null) >/dev/null 2>&1
+service docker stop >/dev/null 2>&1
+
+COMMON_CONFIG="/srv/common"
+# restore netplan config
+cp ${COMMON_CONFIG}/01-network-manager-all.yaml /etc/netplan/
+chmod 644 /etc/netplan/01-network-manager-all.yaml
+netplan apply >/dev/null 2>&1
+
+# teardown qemu
+VM_NAME="netbsd"
+CONFIG_DIR="/srv/netsec"
+virsh destroy ${VM_NAME} >/dev/null 2>&1
+virsh undefine ${VM_NAME} --snapshots-metadata >/dev/null 2>&1
+
+# restore default iptables rules
+DEFAULT_RULES="${COMMON_CONFIG}/default-rules.ipv4"
+CURRENT_RULES="/etc/iptables/rules.v4"
+cp ${DEFAULT_RULES} ${CURRENT_RULES}
+chmod 644 ${CURRENT_RULES}
+iptables-restore < ${CURRENT_RULES} >/dev/null 2>&1
+
+# remove attacker ip from /etc/hosts
+sed -i "/.*attacker$/d" /etc/hosts
+
+echo "Existing NetSec environment destroyed"

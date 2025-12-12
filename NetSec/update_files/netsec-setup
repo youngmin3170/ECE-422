@@ -1,0 +1,198 @@
+#!/bin/bash
+if [ "$EUID" -ne 0 ]; then
+    echo "please run as root"
+    echo "No change has been made."
+    exit 1
+fi
+if [ "$#" -lt 1 ]; then
+    echo "argument missing"
+    echo "usage: sudo netsec-setup path-to-netid-file"
+    echo "No change has been made."
+    exit 1
+fi
+PARTNERS="$1"
+if [ ! -f ${PARTNERS} ]; then
+    echo "${PARTNERS} does not exist."
+    echo "No change has been made."
+    exit 1
+fi
+COUNT=$(sed '/^#/d; /^$/d' ${PARTNERS} | wc -l | sed 's/[[:space:]]*//g')
+if [ "${COUNT}" == "0" ]; then
+    echo "Please fill ${PARTNERS} and try again."
+    echo "No change has been made."
+    exit 1
+fi
+
+echo "Setting up a new NetSec environment..."
+echo "This will take a few minutes."
+
+# destroy existing setup first
+if ! netsec-destroy; then
+    echo "If you wish to simply restart an existing environment, please run 'netsec-restart' instead."
+    exit 1
+fi
+
+service docker restart >/dev/null 2>&1
+
+CONFIG_DIR="/srv/netsec"
+# create bridge interfaces
+cp ${CONFIG_DIR}/netplan/01-network-manager-all.yaml /etc/netplan/
+chmod 644 /etc/netplan/01-network-manager-all.yaml
+netplan apply >/dev/null 2>&1
+
+# create docker bridge
+SUBNET="10.4.22"
+NETWORK_ALIAS="bankofbailey.com"
+DOCKER_BRIDGE_NAME="switch"
+docker network create --internal --subnet="${SUBNET}.0/24" -o com.docker.network.bridge.name="${DOCKER_BRIDGE_NAME}" ${NETWORK_ALIAS} >/dev/null 2>&1
+
+# enable ipv4 forward
+sed -i "/^net\.ipv4\.ip_forward/d" /etc/sysctl.conf
+echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+
+# disable source address verification
+sed -i "/\.rp_filter/d" /etc/sysctl.conf
+echo "net.ipv4.conf.all.rp_filter = 0" >> /etc/sysctl.conf
+echo "net.ipv4.conf.switch.rp_filter = 0" >> /etc/sysctl.conf
+echo "net.ipv4.conf.shimomura.rp_filter = 0" >> /etc/sysctl.conf
+
+# enable custom run-level services for disabling tcp offloading and starting netsec
+update-rc.d disable-toe enable
+update-rc.d start-netsec enable
+
+# add iptables rules
+# iptables rules for netsec
+# Flush then create new chains
+iptables -F
+iptables -X
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT DROP
+
+# allow IN/OUT on loopback
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# allow IN/OUT for established
+iptables -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -A OUTPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# allow incoming icmp
+iptables -A INPUT -p icmp --icmp-type echo-request -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+
+# allow dhcp
+iptables -A OUTPUT -p udp --sport 68 --dport 67 -j ACCEPT
+iptables -A INPUT -p udp --sport 67 --dport 68 -j ACCEPT
+
+# allow incoming ssh on eth0
+iptables -A INPUT -i eth0 -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+
+# allow outgoing dns
+iptables -A OUTPUT -p tcp -m tcp --dport 53 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+iptables -A OUTPUT -p udp -m udp --dport 53 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+
+# default github.com IPs
+# do dig here as well to prevent https://api.github.com/meta not returning all API IPs and lock itself out
+DEFAULT_GITHUB_API="$(dig api.github.com +short | tail -1)"
+iptables -A OUTPUT -d ${DEFAULT_GITHUB_API}/32 -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+iptables -A OUTPUT -d ${DEFAULT_GITHUB_API}/32 -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+iptables -A OUTPUT -d ${DEFAULT_GITHUB_API}/32 -p tcp -m tcp --dport 80 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+iptables -A OUTPUT -d ${DEFAULT_GITHUB_API}/32 -p icmp --icmp-type echo-request -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+
+DEFAULT_GITHUB="$(curl -s https://api.github.com/meta | python3 -c 'import json; import sys; meta = json.load(sys.stdin); subnets = [*meta["api"],*meta["git"],*meta["web"]]; subnets = [i for i in subnets if ":" not in i]; uq_subnets = set(subnets); print("\n".join(sorted(uq_subnets)))')"
+while IFS= read -r subnet; do
+    iptables -A OUTPUT -d ${subnet} -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+    iptables -A OUTPUT -d ${subnet} -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+    iptables -A OUTPUT -d ${subnet} -p tcp -m tcp --dport 80 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+done <<< "$DEFAULT_GITHUB"
+
+# allow https to vpn.illinois.edu
+TIMEOUT=10
+
+FOUND_VPN=0
+for i in {1..9}; do
+  VPN_I="$(dig vpn4g-$i.gw.illinois.edu +short | tail -1)"
+  timeout ${TIMEOUT} /bin/bash -c "while [ -z ${VPN_I} ]; do sleep 1; echo 'Retrying vpn4g-$i.gw.illinois.edu...'; VPN_I=$(dig vpn4g-$i.gw.illinois.edu +short | tail -1); done" >/dev/null 2>&1
+  if [ -z ${VPN_I} ]; then
+    echo "No record on vpn4g-$i.gw.illinois.edu." >/dev/null 2>&1
+  else
+    echo "IP of vpn4g-$i.gw.illinois.edu. is ${VPN_I}" >/dev/null 2>&1
+    iptables -A OUTPUT -d ${VPN_I}/32 -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+    FOUND_VPN=$((FOUND_VPN+1))
+  fi
+done
+
+if [[ FOUND_VPN -lt 1 ]]; then
+  # fallback IPs
+  iptables -A OUTPUT -d 192.17.88.30/32   -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+  iptables -A OUTPUT -d 128.174.81.154/32 -p tcp -m tcp --dport 443 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+fi
+
+
+# allow ntp
+NTP1="130.126.24.24"
+NTP2="130.126.24.44"
+NTP3="130.126.24.53"
+iptables -A OUTPUT -d ${NTP1}/32 -p udp --dport 123 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+iptables -A OUTPUT -d ${NTP2}/32 -p udp --dport 123 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+iptables -A OUTPUT -d ${NTP3}/32 -p udp --dport 123 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+
+# rules for bridges
+DOCKER_BRIDGE="switch"
+NETBSD_BRIDGE="shimomura"
+iptables -A INPUT -i ${DOCKER_BRIDGE} -j ACCEPT
+iptables -A OUTPUT -o ${DOCKER_BRIDGE} -j ACCEPT
+iptables -A INPUT -i ${NETBSD_BRIDGE} -j ACCEPT
+iptables -A OUTPUT -o ${NETBSD_BRIDGE} -j ACCEPT
+
+iptables-save > /etc/iptables/rules.v4
+
+# github.com ip address update
+COMMON_CONFIG="/srv/common"
+echo "${DEFAULT_GITHUB_API}" > ${COMMON_CONFIG}/current-github-api-ip
+echo "${DEFAULT_GITHUB}" > ${COMMON_CONFIG}/current-github-ip
+# add iptables update script to cronjob
+sed -i "/update-iptables/d" /etc/crontab
+echo "*/15 * * * * root ${COMMON_CONFIG}/update-iptables.sh >/dev/null 2>&1" >> /etc/crontab
+
+${CONFIG_DIR}/helper/hidden/add-forwarding-rules.sh >/dev/null 2>&1
+
+sed '/^#/d; /^$/d' ${PARTNERS} | tr '[:upper:]' '[:lower:]' > ${CONFIG_DIR}/netids
+NETIDS="$(cat ${CONFIG_DIR}/netids | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+
+# run containers
+${CONFIG_DIR}/helper/hidden/run-containers.sh >/dev/null 2>&1
+
+brctl stp shimomura off >/dev/null 2>&1
+brctl setfd shimomura 0 >/dev/null 2>&1
+# run netbsd vm
+VM_NAME="netbsd"
+qemu-img convert -f vmdk -O qcow2 ${CONFIG_DIR}/netbsd/netbsd-disk1.vmdk ${CONFIG_DIR}/netbsd/netbsd-disk1.img >/dev/null 2>&1
+virsh define ${CONFIG_DIR}/netbsd/config.xml >/dev/null 2>&1
+virsh autostart ${VM_NAME} --disable >/dev/null 2>&1
+virsh snapshot-create-as --domain ${VM_NAME} --name genesis >/dev/null 2>&1
+virsh start ${VM_NAME} >/dev/null 2>&1
+
+ATTACKER_IP="$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' attacker 2>/dev/null)"
+sed -i "/.*attacker$/d" /etc/hosts
+echo -e "${ATTACKER_IP}\tattacker" >> /etc/hosts
+echo "A new NetSec environment is set up with following NetID(s): ${NETIDS}"
+echo "Attacker IP is ${ATTACKER_IP}"
+echo "To connect:"
+echo "     ssh root@${ATTACKER_IP}"
+echo "  or ssh root@attacker"
+echo "$(date +'%s'),${NETIDS},${ATTACKER_IP}" >> ${CONFIG_DIR}/history.csv
+
+VM_IP="10.4.61.25"
+VM_NAME="Osiris"
+TIMEOUT=180
+echo "Please wait up to ${TIMEOUT} seconds for Osiris (${VM_IP}) to be ready..."
+timeout ${TIMEOUT} /bin/bash -c "until ping -c1 ${VM_IP} &>/dev/null; do sleep 3; done"
+ping -c1 ${VM_IP} &>/dev/null || {
+    echo "Failed to reach ${VM_NAME} within ${TIMEOUT} seconds.";
+    echo "Try 'ping ${VM_IP}' to check if ${VM_NAME} is online."
+    echo "If ${VM_NAME} doesn't become reachable within 5 minutes, please re-run 'netsec-setup'."
+    exit 1;
+}
+
+echo "NetSec environment is ready."

@@ -1,0 +1,9 @@
+proj2_inject3
+8.0.42-0ubuntu0.20.04.1
+HINT,SECRET,foo,inject3_users
+mmdguxgbmt
+
+https://www.w3schools.com/sql
+https://portswigger.net/web-security/sql-injection/
+https://stackoverflow.com/questions/662207/mysql-results-as-comma-separated-list
+https://www.md5hashgenerator.com/
